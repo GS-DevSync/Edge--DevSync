@@ -1,12 +1,26 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-const char* ssid = "Wokwi-GUEST";
-const char* password = "";
+// ---------------- CONFIGURAÇÃO LCD ----------------
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-String IOTA_URL = "http://20.119.99.133:4041/iot/json";
+// ---------------- CONFIGURAÇÃO WI-FI E MQTT ----------------
+const char* SSID = "Wokwi-GUEST";
+const char* PASSWORD = "";
+const char* BROKER_MQTT = "20.119.99.133";
+const int BROKER_PORT = 1883;
+const char* TOPICO_SUBSCRIBE = "/TEF/lamp001/cmd";
+const char* TOPICO_PUBLISH = "/TEF/lamp001/attrs";
+const char* ID_MQTT = "fiware_001";
+const int D4 = 2;
 
+WiFiClient espClient;
+PubSubClient MQTT(espClient);
+char EstadoSaida = '0';
+
+// ---------------- ESTRUTURA DE USUÁRIOS ----------------
 struct Usuario {
   String uid;
   String nome;
@@ -15,79 +29,119 @@ struct Usuario {
 };
 
 Usuario usuarios[] = {
-  {"123456", "Giovanna Sayama", "Front-end Developer", "Junior"},
-  {"67890", "Carlos Mendes", "Engenheiro de Software", "Pleno"},
-  {"11111", "Mariana Silva", "Tech Lead", "Senior"}
+  {"123456", "Giovanna", "Front-end Dev", "Junior"},
+  {"67890", "Carlos", "Engenheiro Software", "Pleno"},
+  {"11111", "Mariana", "Tech Lead", "Senior"}
 };
+int totalUsuarios = sizeof(usuarios)/sizeof(usuarios[0]);
 
-int total = sizeof(usuarios) / sizeof(usuarios[0]);
-
-Usuario* buscar(String uid) {
-  for (int i = 0; i < total; i++) {
-    if (usuarios[i].uid == uid) return &usuarios[i];
+Usuario* buscarUsuario(String uid){
+  for(int i=0; i<totalUsuarios; i++){
+    if(usuarios[i].uid == uid) return &usuarios[i];
   }
   return NULL;
 }
 
-void setup() {
-  Serial.begin(115200);
-
-  WiFi.begin(ssid, password);
-  Serial.print("Conectando ao WiFi...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nWiFi conectado!");
-  Serial.println("Digite o UID:");
+// ---------------- FUNÇÕES ----------------
+void mostrarLCD(String l1, String l2){
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(l1);
+  lcd.setCursor(0,1);
+  lcd.print(l2);
 }
 
-void loop() {
-  if (Serial.available()) {
+void mqtt_callback(char* topic, byte* payload, unsigned int length){
+  String msg;
+  for(int i=0;i<length;i++) msg += (char)payload[i];
+  Serial.print("Mensagem recebida MQTT: "); Serial.println(msg);
 
+  if(msg == "lamp001@on|"){
+    digitalWrite(D4,HIGH);
+    EstadoSaida = '1';
+  }
+  if(msg == "lamp001@off|"){
+    digitalWrite(D4,LOW);
+    EstadoSaida = '0';
+  }
+}
+
+void reconnectMQTT(){
+  while(!MQTT.connected()){
+    Serial.print("Conectando ao Broker MQTT...");
+    if(MQTT.connect(ID_MQTT)){
+      Serial.println("Conectado!");
+      MQTT.subscribe(TOPICO_SUBSCRIBE);
+    } else {
+      Serial.println("Falha. Tentando novamente...");
+      delay(2000);
+    }
+  }
+}
+
+void reconectWiFi(){
+  if(WiFi.status()==WL_CONNECTED) return;
+  WiFi.begin(SSID,PASSWORD);
+  while(WiFi.status()!=WL_CONNECTED){
+    Serial.print(".");
+    delay(100);
+  }
+  Serial.println("\nWiFi conectado!");
+  Serial.println(WiFi.localIP());
+  digitalWrite(D4,LOW); // LED inicia desligado
+}
+
+void enviarEstadoMQTT(){
+  if(EstadoSaida=='1') MQTT.publish(TOPICO_PUBLISH,"s|on");
+  if(EstadoSaida=='0') MQTT.publish(TOPICO_PUBLISH,"s|off");
+}
+
+// ---------------- SETUP ----------------
+void setup(){
+  Serial.begin(115200);
+  pinMode(D4,OUTPUT);
+  lcd.init();
+  lcd.backlight();
+  mostrarLCD("Inicializando","...");
+
+  reconectWiFi();
+  MQTT.setServer(BROKER_MQTT,BROKER_PORT);
+  MQTT.setCallback(mqtt_callback);
+
+  mostrarLCD("Digite UID","");
+}
+
+// ---------------- LOOP ----------------
+void loop(){
+  // Leitura Serial
+  if(Serial.available()){
     String uid = Serial.readStringUntil('\n');
     uid.trim();
+    Usuario* u = buscarUsuario(uid);
 
-    Usuario* u = buscar(uid);
+    if(u){
+      Serial.println("Usuario encontrado:");
+      Serial.println("Nome: "+u->nome);
+      Serial.println("Cargo: "+u->cargo);
+      Serial.println("Senioridade: "+u->senioridade);
 
-    if (u == NULL) {
-      Serial.println("UID não encontrada.");
-      return;
+      mostrarLCD(u->nome,u->cargo+"-"+u->senioridade);
+      // Simula envio MQTT
+      String json = "{\"uid\":\""+u->uid+"\",\"nome\":\""+u->nome+"\",\"cargo\":\""+u->cargo+"\",\"senioridade\":\""+u->senioridade+"\"}";
+      MQTT.publish(TOPICO_PUBLISH,json.c_str());
+      delay(3000);
+    } else {
+      Serial.println("UID nao encontrada");
+      mostrarLCD("UID nao","encontrada");
+      delay(2000);
     }
 
-    StaticJsonDocument<300> doc;
-
-    doc["id"] = "User." + u->uid;
-    doc["type"] = "UserAccess";
-
-    doc["uid"] = u->uid;
-    doc["nome"] = u->nome;
-    doc["cargo"] = u->cargo;
-    doc["senioridade"] = u->senioridade;
-
-    String json;
-    serializeJson(doc, json);
-
-    Serial.println("\nENVIANDO PARA O IOT AGENT:");
-    Serial.println(json);
-
-    HTTPClient http;
-    http.begin(IOTA_URL);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Fiware-Service", "helmo");
-    http.addHeader("Fiware-ServicePath", "/");
-
-    int status = http.POST(json);
-
-    Serial.print("\nStatus: ");
-    Serial.println(status);
-
-    Serial.println("Resposta:");
-    Serial.println(http.getString());
-
-    http.end();
-
-    Serial.println("\nDigite outro UID:");
+    mostrarLCD("Digite UID","");
   }
+
+  // Mantem conexão
+  reconectWiFi();
+  if(!MQTT.connected()) reconnectMQTT();
+  MQTT.loop();
+  enviarEstadoMQTT();
 }
