@@ -1,31 +1,30 @@
+//Autor: Fábio Henrique Cabrini
+//Resumo: Esse programa possibilita ligar e desligar o led onboard, além de mandar o status para o Broker MQTT possibilitando o Helix saber
+//se o led está ligado ou desligado.
+//Revisões:
+//Rev1: 26-08-2023 Código portado para o ESP32 e para realizar a leitura de luminosidade e publicar o valor em um tópico aprorpiado do broker 
+//Autor Rev1: Lucas Demetrius Augusto 
+//Rev2: 28-08-2023 Ajustes para o funcionamento no FIWARE Descomplicado
+//Autor Rev2: Fábio Henrique Cabrini
+//Rev3: 1-11-2023 Refinamento do código e ajustes para o funcionamento no FIWARE Descomplicado
+//Autor Rev3: Fábio Henrique Cabrini
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <DHT.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 
-// ---------------- LCD I2C ----------------
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-// ------------------- CONFIGURAÇÕES -------------------
-const char* default_SSID = "Optilink casa praia";
-const char* default_PASSWORD = "sayama00";
-const char* default_BROKER_MQTT = "20.119.99.133";
-const int   default_BROKER_PORT = 1883;
-
-const char* default_TOPICO_SUBSCRIBE = "/TEF/lamp001/cmd";
-const char* default_TOPICO_PUBLISH_1 = "/TEF/lamp001/attrs";
-const char* default_TOPICO_PUBLISH_2 = "/TEF/lamp001/attrs/l";
-
-const char* default_ID_MQTT = "fiware_001";
-const int default_D4 = 2;
-
-const int DHTPIN = 4;
-#define DHTTYPE DHT11
-
+// Configurações - variáveis editáveis
+const char* default_SSID = "Wokwi-GUEST"; // Nome da rede Wi-Fi
+const char* default_PASSWORD = ""; // Senha da rede Wi-Fi
+const char* default_BROKER_MQTT = "20.163.23.245"; // IP do Broker MQTT
+const int default_BROKER_PORT = 1883; // Porta do Broker MQTT
+const char* default_TOPICO_SUBSCRIBE = "/TEF/lamp001/cmd"; // Tópico MQTT de escuta
+const char* default_TOPICO_PUBLISH_1 = "/TEF/lamp001/attrs"; // Tópico MQTT de envio de informações para Broker
+const char* default_TOPICO_PUBLISH_2 = "/TEF/lamp001/attrs/l"; // Tópico MQTT de envio de informações para Broker
+const char* default_ID_MQTT = "fiware_001"; // ID MQTT
+const int default_D4 = 2; // Pino do LED onboard
+// Declaração da variável para o prefixo do tópico
 const char* topicPrefix = "lamp001";
 
-// ------------------- VARIÁVEIS EDITÁVEIS -------------------
+// Variáveis para configurações editáveis
 char* SSID = const_cast<char*>(default_SSID);
 char* PASSWORD = const_cast<char*>(default_PASSWORD);
 char* BROKER_MQTT = const_cast<char*>(default_BROKER_MQTT);
@@ -40,175 +39,136 @@ WiFiClient espClient;
 PubSubClient MQTT(espClient);
 char EstadoSaida = '0';
 
-DHT dht(DHTPIN, DHTTYPE);
-
-// ------------------- ESTRUTURA DE USUÁRIOS -------------------
-
-struct Pessoa {
-  String uid;
-  String nome;
-  String cargo;
-  String senioridade;
-};
-
-Pessoa lista[] = {
-  {"123456", "Giovanna", "Eng. Software", "Sênior"},
-  {"987654", "Lucas", "Front-End", "Júnior"},
-  {"445566", "Maria", "Técnica IoT", "Pleno"}
-};
-
-int total = sizeof(lista) / sizeof(lista[0]);
-
-// ------------------- FUNÇÕES -------------------
-
-void mostrarLCD(String l1, String l2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(l1);
-  lcd.setCursor(0, 1);
-  lcd.print(l2);
+void initSerial() {
+    Serial.begin(115200);
 }
 
-void verificarUID(String uid) {
-  uid.trim();
-
-  for (int i = 0; i < total; i++) {
-    if (uid == lista[i].uid) {
-
-      Serial.println("\n=== USUARIO ENCONTRADO ===");
-      Serial.println("Nome: " + lista[i].nome);
-      Serial.println("Cargo: " + lista[i].cargo);
-      Serial.println("Senioridade: " + lista[i].senioridade);
-      Serial.println("==========================");
-
-      mostrarLCD(lista[i].nome, lista[i].cargo);
-      delay(3000);
-      mostrarLCD("Senioridade:", lista[i].senioridade);
-      delay(3000);
-
-      String json = "{";
-      json += "\"uid\":\"" + lista[i].uid + "\",";
-      json += "\"nome\":\"" + lista[i].nome + "\",";
-      json += "\"cargo\":\"" + lista[i].cargo + "\",";
-      json += "\"senioridade\":\"" + lista[i].senioridade + "\"";
-      json += "}";
-
-      MQTT.publish(TOPICO_PUBLISH_1, json.c_str());
-
-      Serial.println("Dados enviados ao FIWARE:");
-      Serial.println(json);
-
-      mostrarLCD("Digite UID:", "");
-      return;
-    }
-  }
-
-  Serial.println("UID NAO ENCONTRADA");
-  mostrarLCD("UID NAO", "ENCONTRADA");
-  delay(2000);
-  mostrarLCD("Digite UID:", "");
+void initWiFi() {
+    delay(10);
+    Serial.println("------Conexao WI-FI------");
+    Serial.print("Conectando-se na rede: ");
+    Serial.println(SSID);
+    Serial.println("Aguarde");
+    reconectWiFi();
 }
 
-// ------------------- WI-FI -------------------
+void initMQTT() {
+    MQTT.setServer(BROKER_MQTT, BROKER_PORT);
+    MQTT.setCallback(mqtt_callback);
+}
+
+void setup() {
+    InitOutput();
+    initSerial();
+    initWiFi();
+    initMQTT();
+    delay(5000);
+    MQTT.publish(TOPICO_PUBLISH_1, "s|on");
+}
+
+void loop() {
+    VerificaConexoesWiFIEMQTT();
+    EnviaEstadoOutputMQTT();
+    handleLuminosity();
+    MQTT.loop();
+}
 
 void reconectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+    if (WiFi.status() == WL_CONNECTED)
+        return;
+    WiFi.begin(SSID, PASSWORD);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(100);
+        Serial.print(".");
+    }
+    Serial.println();
+    Serial.println("Conectado com sucesso na rede ");
+    Serial.print(SSID);
+    Serial.println("IP obtido: ");
+    Serial.println(WiFi.localIP());
 
-  WiFi.begin(SSID, PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(100);
-  }
-
-  Serial.println("\nWiFi conectado!");
-  Serial.println(WiFi.localIP());
-  digitalWrite(D4, LOW);
+    // Garantir que o LED inicie desligado
+    digitalWrite(D4, LOW);
 }
-
-// ------------------- MQTT -------------------
 
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
-  String msg;
-  for (int i = 0; i < length; i++) msg += (char)payload[i];
+    String msg;
+    for (int i = 0; i < length; i++) {
+        char c = (char)payload[i];
+        msg += c;
+    }
+    Serial.print("- Mensagem recebida: ");
+    Serial.println(msg);
 
-  Serial.print("Comando MQTT recebido: ");
-  Serial.println(msg);
+    // Forma o padrão de tópico para comparação
+    String onTopic = String(topicPrefix) + "@on|";
+    String offTopic = String(topicPrefix) + "@off|";
 
-  if (msg == "lamp001@on|") {
-    digitalWrite(D4, HIGH);
-    EstadoSaida = '1';
-  }
+    // Compara com o tópico recebido
+    if (msg.equals(onTopic)) {
+        digitalWrite(D4, HIGH);
+        EstadoSaida = '1';
+    }
 
-  if (msg == "lamp001@off|") {
-    digitalWrite(D4, LOW);
-    EstadoSaida = '0';
-  }
+    if (msg.equals(offTopic)) {
+        digitalWrite(D4, LOW);
+        EstadoSaida = '0';
+    }
 }
 
-void reconnectMQTT() {
-  while (!MQTT.connected()) {
-    Serial.print("Reconectando ao broker...");
-    if (MQTT.connect(ID_MQTT)) {
-      Serial.println("Conectado!");
-      MQTT.subscribe(TOPICO_SUBSCRIBE);
-    } else {
-      Serial.println("Falhou. Tentando novamente...");
-      delay(2000);
-    }
-  }
+void VerificaConexoesWiFIEMQTT() {
+    if (!MQTT.connected())
+        reconnectMQTT();
+    reconectWiFi();
 }
 
 void EnviaEstadoOutputMQTT() {
-  if (EstadoSaida == '1') MQTT.publish(TOPICO_PUBLISH_1, "s|on");
-  if (EstadoSaida == '0') MQTT.publish(TOPICO_PUBLISH_1, "s|off");
-  delay(1000);
+    if (EstadoSaida == '1') {
+        MQTT.publish(TOPICO_PUBLISH_1, "s|on");
+        Serial.println("- Led Ligado");
+    }
+
+    if (EstadoSaida == '0') {
+        MQTT.publish(TOPICO_PUBLISH_1, "s|off");
+        Serial.println("- Led Desligado");
+    }
+    Serial.println("- Estado do LED onboard enviado ao broker!");
+    delay(1000);
 }
 
-// ------------------- LEITURA TEMPERATURA -------------------
+void InitOutput() {
+    pinMode(D4, OUTPUT);
+    digitalWrite(D4, HIGH);
+    boolean toggle = false;
 
-void handleDHT() {
-  float t = dht.readTemperature();
-  if (isnan(t)) return;
-
-  char buffer[10];
-  itoa((int)t, buffer, 10);
-  MQTT.publish(TOPICO_PUBLISH_2, buffer);
-
-  Serial.print("Temperatura enviada: ");
-  Serial.println(buffer);
+    for (int i = 0; i <= 10; i++) {
+        toggle = !toggle;
+        digitalWrite(D4, toggle);
+        delay(200);
+    }
 }
 
-// ------------------- SETUP -------------------
-
-void setup() {
-  pinMode(D4, OUTPUT);
-  Serial.begin(115200);
-
-  dht.begin();
-  lcd.init();
-  lcd.backlight();
-
-  mostrarLCD("Inicializando", "...");
-
-  reconectWiFi();
-  MQTT.setServer(BROKER_MQTT, BROKER_PORT);
-  MQTT.setCallback(mqtt_callback);
-
-  mostrarLCD("Digite UID:", "");
+void reconnectMQTT() {
+    while (!MQTT.connected()) {
+        Serial.print("* Tentando se conectar ao Broker MQTT: ");
+        Serial.println(BROKER_MQTT);
+        if (MQTT.connect(ID_MQTT)) {
+            Serial.println("Conectado com sucesso ao broker MQTT!");
+            MQTT.subscribe(TOPICO_SUBSCRIBE);
+        } else {
+            Serial.println("Falha ao reconectar no broker.");
+            Serial.println("Haverá nova tentativa de conexão em 2s");
+            delay(2000);
+        }
+    }
 }
 
-// ------------------- LOOP -------------------
-
-void loop() {
-  if (Serial.available()) {
-    String uid = Serial.readStringUntil('\n');
-    verificarUID(uid);
-  }
-
-  reconectWiFi();
-  if (!MQTT.connected()) reconnectMQTT();
-  MQTT.loop();
-
-  handleDHT();
-  EnviaEstadoOutputMQTT();
+void handleLuminosity() {
+    const int potPin = 34;
+    int sensorValue = analogRead(potPin);
+    int luminosity = map(sensorValue, 0, 4095, 0, 100);
+    String mensagem = String(luminosity);
+    Serial.print("Valor da luminosidade: ");
+    Serial.println(mensagem.c_str());
+    MQTT.publish(TOPICO_PUBLISH_2, mensagem.c_str());
 }
